@@ -197,28 +197,50 @@ varImpPlot(nodegree.rf, main = "Variable Importance Plot for Subgroup Without De
 
 # Establish prediction intervals 
 
-degree.qrf <-
-  quantregForest(
-    x = lalonde.degree %>%
-      select(-re78, -counterfactuals),
-    y = lalonde.degree$re78,
-    ntree = 1000,
-    mtry = 2,
-    importance = TRUE
-  )
+# This function represents the same calculations as done separately above for the degree
+# and no degree group.
 
-nodegree.qrf <-
-  quantregForest(
-    x = lalonde.nodegree %>%
-      select(-re78, -counterfactuals),
-    y = lalonde.nodegree$re78,
-    ntree = 1000,
-    mtry = 2,
-    importance = TRUE
-  )
+rf.effect <- function(data,index) {
+  data.rf <-
+    randomForest(
+      re78 ~ treat + re74 + re75 + age + educ + black + hisp + married,
+      data = data[index,],
+      ntree = 1000,
+      mtry = 2,
+      importance = TRUE
+    )
+  data.counter <- data
+  data.treat.index <- which(data.counter$treat == 1)
+  data.counter[data.treat.index,]$treat <- 0
+  data.counter[-data.treat.index,]$treat <- 1
+  pred.data.rf <-
+    predict(data.rf, newdata = data.counter)
+  data$counterfactuals <- pred.data.rf
+  data.treat.whentreated <- mean(data[data.treat.index,]$re78)
+  data.treat.whencontrol <- mean(data[-data.treat.index,]$counterfactuals)
+  data.treat <-
+    (
+      data.treat.whentreated * length(data.treat.index) + 
+        data.treat.whencontrol * (nrow(data) - length(data.treat.index))
+    ) / nrow(data)
+  data.control.whencontrol <- mean(data[-data.treat.index,]$re78)
+  data.control.whentreated <- mean(data[data.treat.index,]$counterfactuals)
+  data.control <-
+    (
+      data.control.whentreated * length(data.treat.index) + 
+        data.control.whencontrol * (nrow(data) - length(data.treat.index))
+    ) / nrow(data)
+  data.effect <- data.treat - data.control
+  return(data.effect)
+}
 
-degree.PI <- predict(degree.qrf, lalonde.nodegree.counter, what = c(0.025, 0.975))
-nodegree.PI <- predict(nodegree.qrf, lalonde.nodegree.counter, what = c(0.025, 0.975))
+degree.boot <- boot(lalonde.degree, rf.effect, 1000)
+sort.degree.boot <- sort(degree.boot$t)
+degree.boot.interval <- c(sort.degree.boot[25], sort.degree.boot[975])
+
+nodegree.boot <- boot(lalonde.nodegree, rf.effect, 1000)
+sort.nodegree.boot <- sort(nodegree.boot$t)
+nodegree.boot.interval <- c(sort.nodegree.boot[25], sort.nodegree.boot[975])
 
 ####################################
 ##       FISHER'S EXACT TEST      ##
@@ -386,6 +408,3 @@ mean(nodegree.obs < iter.RI(data = lalonde.nodegree, iterations = 10000, sharp =
 
 ## or, use the function
 find.fisherinterval(lalonde.nodegree)
-
-
-
