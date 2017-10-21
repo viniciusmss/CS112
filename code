@@ -22,8 +22,10 @@ lalonde.plt[treat.index,]$treat <- "Treatment Group"
 lalonde.plt[-treat.index,]$treat <- "Control Group"
 lalonde.plt[nodegree.index,]$nodegr <- "No Degree"
 lalonde.plt[-nodegree.index,]$nodegr <- "Has Degree"
-lalonde.plt$Degree <- lalonde.plt$nodegr
-lalonde.plt$Treatment <- lalonde.plt$treat
+lalonde.plt$`Degree Status` <- lalonde.plt$nodegr
+lalonde.plt$`Treatment Status` <- lalonde.plt$treat
+lalonde.plt$`1978 Real Earnings` <- lalonde.plt$re78
+
 
 ###############################
 ##      CAUSAL ANALYSIS      ##
@@ -52,9 +54,9 @@ controlG.nodeg.CI <- smean.cl.boot(treatG.nodeg$re78, conf.int = .95)
 t.test(treatG.deg$re78, treatG.nodeg$re78)
 
 # Plot the data
-ggplot(data = lalonde.plt, aes(x = Treatment, y = re78)) +
-  geom_point(aes(color = Degree)) +
-  facet_wrap( ~ Degree) +
+ggplot(data = lalonde.plt, aes(x = `Treatment Status`, y = `1978 Real Earnings`)) +
+  geom_point(aes(color = `Degree Status`)) +
+  facet_wrap( ~ `Degree Status`) +
   stat_summary(
     fun.data = "mean_cl_boot",
     geom = "errorbar",
@@ -262,6 +264,70 @@ iter.RI <- function(data = lalonde, iterations = 2000, sharp = 0) {
   return(storage.vector)
 }
 
+find.fisherinterval <- function(data = lalonde, iterations = 2000) {
+  interval  <- c(NA, NA)
+  
+  # treatment and control groups
+  data.treat <- data %>%
+    filter(treat == 1)
+  data.control <- data %>%
+    filter(treat == 0)
+  
+  # observed difference
+  data.obs <-
+    mean(data.treat$re78) - mean(data.control$re78)
+  
+  # to optimze for boundary search, start with sharp null of
+  # relevant quantiles of the distribution under sharp = obs. treatment effect
+  obs.fisher <- iter.RI(data = data, sharp = data.obs, iterations = iterations)
+  temp.quantiles <- quantile(obs.fisher, probs = c(0.025, 0.975))
+  lower.sharp <- temp.quantiles[1]
+  upper.sharp <- temp.quantiles[2]
+  
+  # To find lower boundary, p-value should be 0.025
+  temp.fisher <- iter.RI(data = data, sharp = lower.sharp, iterations = iterations)
+  data.pvalue <- mean(data.obs < temp.fisher)
+  lower.pvalue <- data.pvalue
+  
+  while (abs(lower.pvalue - 0.025) > 0.001) {
+    
+    #if p-value is too low, incrase the sharp
+    if (lower.pvalue < 0.025) {
+      lower.sharp <- lower.sharp + 1
+      temp.fisher <- iter.RI(data = data, sharp = lower.sharp, iterations = iterations)
+      lower.pvalue <- mean(data.obs < temp.fisher)
+    } else if (lower.pvalue > 0.025) { #if p-value is too high, decrease the sharp
+      lower.sharp <- lower.sharp - 1
+      temp.fisher <- iter.RI(data = data, sharp = lower.sharp, iterations = iterations)
+      lower.pvalue <- mean(data.obs < temp.fisher)
+    }
+    cat("For sharp =", lower.sharp, ", the p-value is:", lower.pvalue, "\n")
+  }
+  interval[1] <- lower.sharp
+  
+  # To find upper boundary, p-value should be 0.975
+  temp.fisher <- iter.RI(data = data, sharp = upper.sharp, iterations = iterations)
+  data.pvalue <- mean(data.obs < temp.fisher)
+  upper.pvalue <- data.pvalue
+  
+  while (abs(upper.pvalue - 0.975) > 0.001) {
+    
+    #if p-value is too low, incrase the sharp
+    if (upper.pvalue < 0.975) {
+      upper.sharp <- upper.sharp + 1
+      temp.fisher <- iter.RI(data = data, sharp = upper.sharp, iterations = iterations)
+      upper.pvalue <- mean(data.obs < temp.fisher)
+    } else if (upper.pvalue > 0.975) { #if p-value is too high, decrease the sharp
+      upper.sharp <- upper.sharp - 1
+      temp.fisher <- iter.RI(data = data, sharp = upper.sharp, iterations = iterations)
+      upper.pvalue <- mean(data.obs < temp.fisher)
+    }
+    cat("For sharp =", upper.sharp, ", the p-value is:", upper.pvalue, "\n")
+  }
+  interval[2] <- upper.sharp
+  return(interval)
+}
+
 # # FULL DATA SET
 
 lalonde.fishertest <- iter.RI()
@@ -290,17 +356,14 @@ abline(v = degree.obs, lwd = 2, col = "red")
 
 degree.pvalue <- mean(degree.obs < degree.fishertest)
 
-for (sharp in seq(250, 300, 10)) {
-  temp.fisher <- iter.RI(data = lalonde.degree, sharp = sharp)
-  degree.pvalue <- mean(degree.obs < temp.fisher)
-  cat("For sharp =", sharp, ", the p-value is:", degree.pvalue, "\n")
-}
-
 ## lower bound
 mean(degree.obs < iter.RI(data = lalonde.degree, iterations = 10000, sharp = 275))
 
 ## upper bound 
 mean(degree.obs < iter.RI(data = lalonde.degree, iterations = 10000, sharp = 6190))
+
+## or, use the function
+find.fisherinterval(lalonde.degree)
 
 # # WITHOUT DEGREE
 
@@ -321,9 +384,8 @@ mean(nodegree.obs < iter.RI(data = lalonde.nodegree, iterations = 10000, sharp =
 ## upper bound 
 mean(nodegree.obs < iter.RI(data = lalonde.nodegree, iterations = 10000, sharp = 2490))
 
-for (sharp in seq(2470, 2510, 10)) {
-  temp.fisher <- iter.RI(data = lalonde.nodegree, iterations = 10000, sharp = sharp)
-  degree.pvalue <- mean(nodegree.obs < temp.fisher)
-  cat("For sharp =", sharp, ", the p-value is:", degree.pvalue, "\n")
-}
+## or, use the function
+find.fisherinterval(lalonde.nodegree)
+
+
 
