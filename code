@@ -1,0 +1,329 @@
+# Load all libraries required
+library(Matching)
+library(dplyr)
+library(randomForest)
+library(haven)
+library(ggplot2)
+library(Hmisc)
+library(boot)
+library(quantregForest)
+
+# Load data
+data(lalonde)
+attach(lalonde)
+
+# Create relevant indexes
+nodegree.index <- which(nodegr == 1)
+treat.index <- which(treat == 1)
+
+# Prepare data set and variables for plotting
+lalonde.plt <- lalonde
+lalonde.plt[treat.index,]$treat <- "Treatment Group"
+lalonde.plt[-treat.index,]$treat <- "Control Group"
+lalonde.plt[nodegree.index,]$nodegr <- "No Degree"
+lalonde.plt[-nodegree.index,]$nodegr <- "Has Degree"
+lalonde.plt$Degree <- lalonde.plt$nodegr
+lalonde.plt$Treatment <- lalonde.plt$treat
+
+###############################
+##      CAUSAL ANALYSIS      ##
+###############################
+
+# Separate the data set in four blocks for analysis
+treatG.deg <- lalonde %>% #treatment group with degree
+  filter(treat == 1, nodegr == 0)
+
+treatG.nodeg <- lalonde %>% #treatment group without degree
+  filter(treat == 1, nodegr == 1)
+
+controlG.deg <- lalonde %>% #control group with degree
+  filter(treat == 0, nodegr == 0)
+
+controlG.nodeg <- lalonde %>% #control group without degree
+  filter(treat == 0, nodegr == 1)
+
+# Calculate confidence intervals for the means
+treatG.deg.CI <- smean.cl.boot(treatG.deg$re78, conf.int = .95)
+controlG.deg.CI <- smean.cl.boot(controlG.deg$re78, conf.int = .95)
+treatG.nodeg.CI <- smean.cl.boot(treatG.nodeg$re78, conf.int = .95)
+controlG.nodeg.CI <- smean.cl.boot(treatG.nodeg$re78, conf.int = .95)
+
+# Test the statistical significance of different in means
+t.test(treatG.deg$re78, treatG.nodeg$re78)
+
+# Plot the data
+ggplot(data = lalonde.plt, aes(x = Treatment, y = re78)) +
+  geom_point(aes(color = Degree)) +
+  facet_wrap( ~ Degree) +
+  stat_summary(
+    fun.data = "mean_cl_boot",
+    geom = "errorbar",
+    fun.args = c(conf.int = .95)
+  ) +
+  stat_summary(fun.data = "mean_cl_boot", fun.args = c(conf.int = .95)) +
+  coord_cartesian(ylim = c(0, 25000))
+
+###############################
+##     LINEAR REGRESSION     ##
+###############################
+
+# Create the relevant linear models: full additive, full non-additive, degree, no degree
+lalonde.dlm <-
+  lm(re78 ~ treat + nodegr + re74 + re75 + age + educ + black + hisp + married, data = lalonde)
+summary(lalonde.dlm)
+
+lalonde.dlm.it <-
+  lm(re78 ~ treat + nodegr + treat:nodegr + re74 + re75 + age + educ + black + hisp + married, data = lalonde)
+summary(lalonde.dlm)
+
+deg.dlm <-
+  lm(re78 ~ treat + re74 + re75 + age + educ + black + hisp + married, data = lalonde[-nodegree.index,])
+summary(deg.dlm)
+
+nodeg.dlm <-
+  lm(re78 ~ treat + re74 + re75 + age + educ + black + hisp + married, data = lalonde[nodegree.index,])
+summary(nodeg.dlm)
+
+# Check confidence interval of treatment effect
+confint(lalonde.dlm, "treat")
+confint(deg.dlm, "treat")
+confint(nodeg.dlm, "treat")
+
+###############################
+##      RANDOM FORESTS       ##
+###############################
+
+# Separate data set in two blocks: degree and no degree
+lalonde.degree <- lalonde[-nodegree.index,]
+lalonde.nodegree <- lalonde[nodegree.index,]
+
+# train the random forests
+degree.rf <-
+  randomForest(
+    re78 ~ treat + re74 + re75 + age + educ + black + hisp + married,
+    data = lalonde.degree,
+    ntree = 1000,
+    mtry = 2,
+    importance = TRUE
+  )
+nodegree.rf <-
+  randomForest(
+    re78 ~ treat + re74 + re75 + age + educ + black + hisp + married,
+    data = lalonde.nodegree,
+    ntree = 1000,
+    mtry = 2,
+    importance = TRUE
+  )
+
+# To predict counterfactuals, create a new dataset in which the treatment status is reversed
+lalonde.degree.counter <- lalonde.degree
+degree.treat.index <- which(lalonde.degree.counter$treat == 1)
+lalonde.degree.counter[degree.treat.index,]$treat <- 0
+lalonde.degree.counter[-degree.treat.index,]$treat <- 1
+
+lalonde.nodegree.counter <- lalonde.nodegree
+nodegree.treat.index <- which(lalonde.nodegree.counter$treat == 1)
+lalonde.nodegree.counter[nodegree.treat.index,]$treat <- 0
+lalonde.nodegree.counter[-nodegree.treat.index,]$treat <- 1
+
+# Predict counterfactuals
+pred.degree.rf <-
+  predict(degree.rf, newdata = lalonde.degree.counter)
+pred.nodegree.rf <-
+  predict(nodegree.rf, newdata = lalonde.nodegree.counter)
+
+lalonde.degree$counterfactuals <- pred.degree.rf
+lalonde.nodegree$counterfactuals <- pred.nodegree.rf
+
+
+### DEGREE ANALYSIS
+
+# Calculate means upon treatment, observed and predicted
+degree.treat.whentreated <- mean(lalonde.degree[degree.treat.index,]$re78)
+degree.treat.whencontrol <- mean(lalonde.degree[-degree.treat.index,]$counterfactuals)
+
+# Weighted mean of outcome upon treatment
+degree.treat <-
+  (
+    degree.treat.whentreated * length(degree.treat.index) + 
+    degree.treat.whencontrol * (nrow(lalonde.degree) - length(degree.treat.index))
+  ) / nrow(lalonde.degree)
+
+# Calculate means upon control, observed and predicted
+degree.control.whencontrol <- mean(lalonde.degree[-degree.treat.index,]$re78)
+degree.control.whentreated <- mean(lalonde.degree[degree.treat.index,]$counterfactuals)
+
+# Weighted mean of outcome upon control
+degree.control <-
+  (
+    degree.control.whentreated * length(degree.treat.index) + 
+      degree.control.whencontrol * (nrow(lalonde.degree) - length(degree.treat.index))
+  ) / nrow(lalonde.degree)
+
+# mean sample treatment effect 
+degree.effect <- degree.treat - degree.control
+
+### NO DEGREE ANALYSIS, like the above
+
+nodegree.treat.whentreated <- mean(lalonde.nodegree[nodegree.treat.index,]$re78)
+nodegree.treat.whencontrol <- mean(lalonde.nodegree[-nodegree.treat.index,]$counterfactuals)
+
+nodegree.treat <-
+  (
+    nodegree.treat.whentreated * length(nodegree.treat.index) + 
+      nodegree.treat.whencontrol * (nrow(lalonde.nodegree) - length(nodegree.treat.index))
+  ) / nrow(lalonde.nodegree)
+
+nodegree.control.whencontrol <- mean(lalonde.nodegree[-nodegree.treat.index,]$re78)
+nodegree.control.whentreated <- mean(lalonde.nodegree[nodegree.treat.index,]$counterfactuals)
+
+nodegree.control <-
+  (
+    nodegree.control.whentreated * length(nodegree.treat.index) + 
+      nodegree.control.whencontrol * (nrow(lalonde.nodegree) - length(nodegree.treat.index))
+  ) / nrow(lalonde.nodegree)
+
+nodegree.effect <- nodegree.treat - nodegree.control
+
+# Show importance plots
+
+varImpPlot(degree.rf, main = "Variable Importance Plot for Subgroup With Degrees", type = 2)
+varImpPlot(nodegree.rf, main = "Variable Importance Plot for Subgroup Without Degrees", type = 2)
+
+
+# # # EXTRA CREDIT
+
+# Establish prediction intervals 
+
+degree.qrf <-
+  quantregForest(
+    x = lalonde.degree %>%
+      select(-re78, -counterfactuals),
+    y = lalonde.degree$re78,
+    ntree = 1000,
+    mtry = 2,
+    importance = TRUE
+  )
+
+nodegree.qrf <-
+  quantregForest(
+    x = lalonde.nodegree %>%
+      select(-re78, -counterfactuals),
+    y = lalonde.nodegree$re78,
+    ntree = 1000,
+    mtry = 2,
+    importance = TRUE
+  )
+
+degree.PI <- predict(degree.qrf, lalonde.nodegree.counter, what = c(0.025, 0.975))
+nodegree.PI <- predict(nodegree.qrf, lalonde.nodegree.counter, what = c(0.025, 0.975))
+
+####################################
+##       FISHER'S EXACT TEST      ##
+####################################
+
+assignment <- function(dataset, sharp) {
+  treated.index <- which(dataset$treat == 1)
+  
+  dataset$Y0 <- NA # set all potential outcomes to null
+  dataset$Y1 <- NA
+  
+  dataset[treated.index, ]$Y1 <- #for treatment group, Y1 = Yobs
+    dataset[treated.index, ]$re78 
+  
+  dataset[-treated.index, ]$Y0 <- #for control group, Y0 = Yobs
+    dataset[-treated.index, ]$re78 
+  
+  dataset[treated.index, ]$Y0 <- #for treatment group, Y0 = Yobs - sharp null
+    dataset[treated.index, ]$re78 - sharp 
+  
+  dataset[-treated.index, ]$Y1 <- #for control group, Y1 = Yobs + sharp null
+    dataset[-treated.index, ]$re78 + sharp 
+  
+  # instead of the standard assumption that treatment and control groups have the same size,
+  # this assignment mechanisms preserves the proportionality of the original data set.
+  assign.index <-
+    sample(x = 1:nrow(dataset),
+           size = length(treated.index)) 
+  
+  # separate the groups
+  treatment.group <- dataset[assign.index,]
+  control.group <- dataset[-assign.index,]
+  
+  # calculate the difference in means
+  return(mean(treatment.group$Y1) - mean(control.group$Y0))
+}
+
+iter.RI <- function(data = lalonde, iterations = 2000, sharp = 0) {
+  storage.vector <- NULL
+  for (i in 1:iterations) {
+    storage.vector[i] <- assignment(data, sharp)
+  }
+  return(storage.vector)
+}
+
+# # FULL DATA SET
+
+lalonde.fishertest <- iter.RI()
+lalonde.quantiles <-
+  quantile(lalonde.fishertest, probs = c(0.025, 0.975))
+hist(lalonde.fishertest)
+plot(density(lalonde.fishertest))
+lalonde.obs <-
+  mean(lalonde[treat.index,]$re78) - mean(lalonde[-treat.index,]$re78)
+abline(v = lalonde.quantiles, lwd = 1, col = "blue")
+abline(v = lalonde.obs, lwd = 2, col = "red")
+
+mean(lalonde.obs < lalonde.fishertest)
+
+# # WITH DEGREE
+
+degree.fishertest <- iter.RI(data = lalonde.degree)
+degree.quantiles <-
+  quantile(degree.fishertest, probs = c(0.025, 0.975))
+hist(degree.fishertest)
+plot(density(degree.fishertest))
+degree.obs <-
+  mean(treatG.deg$re78) - mean(controlG.deg$re78)
+abline(v = degree.quantiles, lwd = 1, col = "blue")
+abline(v = degree.obs, lwd = 2, col = "red")
+
+degree.pvalue <- mean(degree.obs < degree.fishertest)
+
+for (sharp in seq(250, 300, 10)) {
+  temp.fisher <- iter.RI(data = lalonde.degree, sharp = sharp)
+  degree.pvalue <- mean(degree.obs < temp.fisher)
+  cat("For sharp =", sharp, ", the p-value is:", degree.pvalue, "\n")
+}
+
+## lower bound
+mean(degree.obs < iter.RI(data = lalonde.degree, iterations = 10000, sharp = 275))
+
+## upper bound 
+mean(degree.obs < iter.RI(data = lalonde.degree, iterations = 10000, sharp = 6190))
+
+# # WITHOUT DEGREE
+
+nodegree.fishertest <- iter.RI(data = lalonde.nodegree)
+nodegree.quantiles <-
+  quantile(nodegree.fishertest, probs = c(0.025, 0.975))
+hist(nodegree.fishertest)
+plot(density(nodegree.fishertest))
+nodegree.obs <-
+  mean(treatG.nodeg$re78) - mean(controlG.nodeg$re78)
+abline(v = nodegree.quantiles, lwd = 1, col = "blue")
+abline(v = nodegree.obs, lwd = 2, col = "red")
+nodegree.pvalue <- mean(nodegree.obs < nodegree.fishertest)
+
+## lower bound
+mean(nodegree.obs < iter.RI(data = lalonde.nodegree, iterations = 10000, sharp = -230))
+
+## upper bound 
+mean(nodegree.obs < iter.RI(data = lalonde.nodegree, iterations = 10000, sharp = 2490))
+
+for (sharp in seq(2470, 2510, 10)) {
+  temp.fisher <- iter.RI(data = lalonde.nodegree, iterations = 10000, sharp = sharp)
+  degree.pvalue <- mean(nodegree.obs < temp.fisher)
+  cat("For sharp =", sharp, ", the p-value is:", degree.pvalue, "\n")
+}
+
