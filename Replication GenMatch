@@ -1,0 +1,55 @@
+library(haven); library(Matching); library(dplyr); library(parallel)
+
+# Load data sets
+cps <- read_dta("C:/Users/Vinic/Downloads/cps_controls.dta")
+nsw <- read_dta("C:/Users/Vinic/Downloads/nsw_dw.dta") %>%
+  filter(treat == 1)
+
+# Prepare CPU
+no_cores <- detectCores() - 1
+cl <- makeCluster(no_cores)
+
+# Prepare data
+lalonde <- rbind(cps, nsw) %>%
+  dplyr::select(-data_id)
+
+Tr <- lalonde %>%
+  dplyr::select(treat) %>%
+  unlist() %>%
+  as.numeric()
+
+Y <- lalonde %>%
+  dplyr::select(re78) %>%
+  unlist() %>%
+  as.numeric()
+
+X <- lalonde %>%
+  dplyr::select(-treat, -re78)
+
+temp.names <- names(X) # this is creating the interactions and quadratic terms  
+for (i in 1:8) {
+  for (j in i:8) {
+    X <- cbind(X, as.matrix(X[, i] * X[, j]))
+    temp.names[length(temp.names) + 1] <- paste(names(X)[i], "*", names(X)[j])
+  }
+}
+names(X) <- temp.names
+
+p.storage <- c() ## store p.values
+est.storage <- c() ## store estimates
+for (i in 1:200) { 
+  cat("The genetic algorithm is running for the", i, "time.\n")
+  gen.fit <- GenMatch(Tr = Tr, X = X, pop.size = 100, cluster = cl,
+                      max.generations = 25, wait.generations = 5, print.level = 0)
+  match <- Match(Y = Y, Tr = Tr, X = X, Weight.matrix = gen.fit$Weight.matrix)
+  p.storage3[i] <- gen.fit$value[1]
+  est.storage3[i] <- match$est[1, 1]
+}
+
+plot(p.storage, est.storage, main = "Dehejia Wahba Sample", 
+     xlab = "Lowest p-value (KS & paired t-tests)",
+     ylab = "Estimated Average Treatment Effect for Treated ($)",
+     ylim = c(400, 2600),
+     xlim = c(0, 0.25))
+abline(h = 1794, lty = 2)
+legend(0.04, 900, lty = 2, legend = "Experimental benchmark estimate ($1974)", bg = "grey")
