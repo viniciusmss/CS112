@@ -1,0 +1,150 @@
+library(haven); library(Matching); library(dplyr); library(parallel)
+
+# Load data sets
+cps <- read_dta("C:/Users/Vinic/Downloads/cps_controls.dta")
+nsw <- read_dta("C:/Users/Vinic/Downloads/nsw_dw.dta")
+
+# Prepare data
+nsw.treat <- nsw %>%
+  dplyr::filter(treat == 1)
+nsw.control <- nsw %>%
+  dplyr::filter(treat == 0)
+
+# (1) Experimental analysis--treatment effect estimate and confience interval
+mean(nsw.treat$re78) - mean(nsw.control$re78)
+nsw.lm <- lm(re78 ~ treat, data = nsw)
+lm.treat.ci <- confint(object = nsw.lm, parm = "treat")
+cat("The experimental 95% confidence interval for the treatment effect is \n(", 
+    lm.treat.ci[1], ", ", lm.treat.ci[2], ").", sep = "")
+
+# (2) Observational analysis
+nsw.obs <- rbind(nsw.treat, cps) %>%
+  dplyr::select(-data_id)
+
+mean(nsw.obs[nsw.obs$treat == 1,]$re78) - mean(nsw.obs[nsw.obs$treat == 0,]$re78)
+nsw.obs.lm <- lm(re78 ~ treat, data = nsw.obs)
+lm.obs.treat.ci <- confint(object = nsw.obs.lm, parm = "treat")
+cat("The non-matched observational 95% confidence interval for the treatment effect is \n(", 
+    lm.obs.treat.ci[1], ", ", lm.obs.treat.ci[2], ").", sep = "")
+
+# (3) Propensity score matching
+nsw.obs.pscore.glm <-
+  glm(
+    treat ~ .:. + I(age**2) + I(education**2) + I(black**2) + I(hispanic**2) + 
+      I(married**2) + I(nodegree**2) + I(re74**2) + I(re75**2),
+    family = binomial,
+    data = nsw.obs %>%
+      select(-re78)
+  )
+
+nsw.obs.pscore <- nsw.obs.pscore.glm$fitted
+Y  <- nsw.obs$re78
+Tr  <- nsw.obs$treat
+
+match.pscore <- Match(Y = Y, Tr = Tr, X = nsw.obs.pscore)
+nsw.obs.pscore.est <- match.pscore$est[1, 1]
+nsw.obs.pscore.se <- match.pscore$se
+nsw.obs.pscore.ci <- c(nsw.obs.pscore.est - 2*nsw.obs.pscore.se, nsw.obs.pscore.est + 2*nsw.obs.pscore.se)
+cat("The propensity-score matched observational 95% confidence interval for the treatment effect is \n(", 
+    nsw.obs.pscore.ci[1], ", ", nsw.obs.pscore.ci[2], ").", sep = "")
+
+# (4) Multivariate matching
+
+X <- cbind(nsw.obs %>% select(-re78, -treat), Propensity = nsw.obs.pscore)
+
+match.multi <- Match(Y = Y, Tr = Tr, X = X)
+nsw.obs.multi.est <- match.multi$est[1, 1]
+nsw.obs.multi.se <- match.multi$se
+nsw.obs.multi.ci <- c(nsw.obs.multi.est - 2*nsw.obs.multi.se, nsw.obs.multi.est + 2*nsw.obs.multi.se)
+cat("The multivariate(ly) matched observational 95% confidence interval for the treatment effect is \n(", 
+    nsw.obs.multi.ci[1], ", ", nsw.obs.multi.ci[2], ").", sep = "")
+
+# (5) Propensity score genetic matching
+
+gen.pscore <- GenMatch(Tr = Tr, X = nsw.obs.pscore, pop.size = 500, print.level = 1)
+match.gen.pscore <- Match(Y = Y, Tr = Tr, X = nsw.obs.pscore, Weight.matrix = gen.pscore)
+nsw.obs.gen.pscore.est <- match.gen.pscore$est[1, 1]
+nsw.obs.gen.pscore.se <- match.gen.pscore$se
+nsw.obs.gen.pscore.ci <- c(nsw.obs.gen.pscore.est - 2*nsw.obs.gen.pscore.se, nsw.obs.gen.pscore.est + 2*nsw.obs.gen.pscore.se)
+cat("The genetic propensity-score matched observational 95% confidence interval for the treatment effect is \n(", 
+    nsw.obs.gen.pscore.ci[1], ", ", nsw.obs.gen.pscore.ci[2], ").", sep = "")
+
+# (6) Multivariate genetic matching
+
+gen.multi <- GenMatch(Tr = Tr, X = X, pop.size = 500, print.level = 1)
+match.gen.multi <- Match(Y = Y, Tr = Tr, X = X, Weight.matrix = gen.multi)
+nsw.obs.gen.multi.est <- match.gen.multi$est[1, 1]
+nsw.obs.gen.multi.se <- match.gen.multi$se
+nsw.obs.gen.multi.ci <- c(nsw.obs.gen.multi.est - 2*nsw.obs.gen.multi.se, nsw.obs.gen.multi.est + 2*nsw.obs.gen.multi.se)
+cat("The genetic multivariate(ly) matched observational 95% confidence interval for the treatment effect is \n(", 
+    nsw.obs.gen.multi.ci[1], ", ", nsw.obs.gen.multi.ci[2], ").", sep = "")
+
+# (7) Parametric optimization of multivariate genetic matching
+
+attach(X)
+BalanceMat <-
+  cbind(
+    age,
+    education,
+    black,
+    hispanic,
+    married,
+    nodegree,
+    re75,
+    re74,
+    I(age * age),
+    I(age * education),
+    I(age * black),
+    I(age * hispanic),
+    I(age * married),
+    I(age * nodegree),
+    I(age * re75),
+    I(age * re74),
+    I(education * education),
+    I(education * black),
+    I(education * hispanic),
+    I(education * married),
+    I(education * nodegree),
+    I(education * re75),
+    I(education * re74),
+    I(black * black),
+    I(black * hispanic),
+    I(black * married),
+    I(black * nodegree),
+    I(black * re75),
+    I(black * re74),
+    I(hispanic * hispanic),
+    I(hispanic * married),
+    I(hispanic * nodegree),
+    I(hispanic * re75),
+    I(hispanic * re74),
+    I(married * married),
+    I(married * nodegree),
+    I(married * re75),
+    I(married * re74),
+    I(nodegree * nodegree),
+    I(nodegree * re75),
+    I(nodegree * re74),
+    I(re75 * re75),
+    I(re75 * re74),
+    I(re74 * re74),
+    nsw.obs.pscore
+  )
+detach(X)  
+
+cl <- makeCluster(detectCores() / 2) # Prepare for parallel processing
+
+gen.opt <- GenMatch(Tr = Tr, X = X, BalanceMatrix = BalanceMat, 
+                    pop.size = 500, print.level = 1, 
+                    exact = NULL, caliper = NULL, cluster = cl)
+match.gen.opt <- Match(Y = Y, Tr = Tr, X = X, caliper = 1e-05, Weight.matrix = gen.opt)
+summary(match.gen.opt)
+nsw.obs.gen.opt.est <- match.gen.opt$est[1, 1]
+nsw.obs.gen.opt.se <- match.gen.opt$se
+nsw.obs.gen.opt.ci <- c(nsw.obs.gen.opt.est - 2*nsw.obs.gen.opt.se, nsw.obs.gen.opt.est + 2*nsw.obs.gen.opt.se)
+cat("The genetic optvariate(ly) matched observational 95% confidence interval for the treatment effect is \n(", 
+    nsw.obs.gen.opt.ci[1], ", ", nsw.obs.gen.opt.ci[2], ").", sep = "")
+
+
+
+
