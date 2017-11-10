@@ -10,6 +10,9 @@ nsw.treat <- nsw %>%
 nsw.control <- nsw %>%
   dplyr::filter(treat == 0)
 
+# Set seed so that results canbe replicated
+set.seed(12345)
+
 # (1) Experimental analysis--treatment effect estimate and confience interval
 mean(nsw.treat$re78) - mean(nsw.control$re78)
 nsw.lm <- lm(re78 ~ treat, data = nsw)
@@ -42,6 +45,7 @@ Y  <- nsw.obs$re78
 Tr  <- nsw.obs$treat
 
 match.pscore <- Match(Y = Y, Tr = Tr, X = nsw.obs.pscore)
+match.pscore.balance <- MatchBalance(treat ~ age + education + black + hispanic + married + nodegree + re74 + re75, data = nsw.obs, match.out = match.pscore)
 nsw.obs.pscore.est <- match.pscore$est[1, 1]
 nsw.obs.pscore.se <- match.pscore$se
 nsw.obs.pscore.ci <- c(nsw.obs.pscore.est - 2*nsw.obs.pscore.se, nsw.obs.pscore.est + 2*nsw.obs.pscore.se)
@@ -53,6 +57,7 @@ cat("The propensity-score matched observational 95% confidence interval for the 
 X <- cbind(nsw.obs %>% select(-re78, -treat), Propensity = nsw.obs.pscore)
 
 match.multi <- Match(Y = Y, Tr = Tr, X = X)
+match.multi.balance <- MatchBalance(treat ~ age + education + black + hispanic + married + nodegree + re74 + re75, data = nsw.obs, match.out = match.multi)
 nsw.obs.multi.est <- match.multi$est[1, 1]
 nsw.obs.multi.se <- match.multi$se
 nsw.obs.multi.ci <- c(nsw.obs.multi.est - 2*nsw.obs.multi.se, nsw.obs.multi.est + 2*nsw.obs.multi.se)
@@ -61,8 +66,9 @@ cat("The multivariate(ly) matched observational 95% confidence interval for the 
 
 # (5) Propensity score genetic matching
 
-gen.pscore <- GenMatch(Tr = Tr, X = nsw.obs.pscore, pop.size = 500, print.level = 1)
+gen.pscore <- GenMatch(Tr = Tr, X = nsw.obs.pscore, print.level = 1)
 match.gen.pscore <- Match(Y = Y, Tr = Tr, X = nsw.obs.pscore, Weight.matrix = gen.pscore)
+match.gen.pscore.balance <- MatchBalance(treat ~ age + education + black + hispanic + married + nodegree + re74 + re75, data = nsw.obs, match.out = match.gen.pscore)
 nsw.obs.gen.pscore.est <- match.gen.pscore$est[1, 1]
 nsw.obs.gen.pscore.se <- match.gen.pscore$se
 nsw.obs.gen.pscore.ci <- c(nsw.obs.gen.pscore.est - 2*nsw.obs.gen.pscore.se, nsw.obs.gen.pscore.est + 2*nsw.obs.gen.pscore.se)
@@ -73,6 +79,7 @@ cat("The genetic propensity-score matched observational 95% confidence interval 
 
 gen.multi <- GenMatch(Tr = Tr, X = X, pop.size = 500, print.level = 1)
 match.gen.multi <- Match(Y = Y, Tr = Tr, X = X, Weight.matrix = gen.multi)
+match.gen.multi.balance <- MatchBalance(treat ~ age + education + black + hispanic + married + nodegree + re74 + re75, data = nsw.obs, match.out = match.gen.multi)
 nsw.obs.gen.multi.est <- match.gen.multi$est[1, 1]
 nsw.obs.gen.multi.se <- match.gen.multi$se
 nsw.obs.gen.multi.ci <- c(nsw.obs.gen.multi.est - 2*nsw.obs.gen.multi.se, nsw.obs.gen.multi.est + 2*nsw.obs.gen.multi.se)
@@ -132,19 +139,48 @@ BalanceMat <-
   )
 detach(X)  
 
-cl <- makeCluster(detectCores() / 2) # Prepare for parallel processing
+cl <- makeCluster(detectCores() - 2) # Prepare for parallel processing
 
-gen.opt <- GenMatch(Tr = Tr, X = X, BalanceMatrix = BalanceMat, 
-                    pop.size = 500, print.level = 1, 
-                    exact = NULL, caliper = NULL, cluster = cl)
-match.gen.opt <- Match(Y = Y, Tr = Tr, X = X, caliper = 1e-05, Weight.matrix = gen.opt)
-summary(match.gen.opt)
+loss.func <- function(p.vals) {
+  loss.out <- c()
+  temp.mean <- mean(p.vals)
+  temp.sd <- sd(p.vals)
+  for (i in 1:length(p.vals)) {
+    loss.out[i] <- (p.vals[i] - temp.mean)/temp.sd
+  }
+  return(sort(loss.out))
+}
+ 
+gen.opt <- GenMatch(Tr = Tr, X = X, BalanceMatrix = BalanceMat, pop.size = 500, print.level = 1)
+match.gen.opt <- Match(Y = Y, Tr = Tr, X = X, Weight.matrix = gen.opt)
+match.gen.opt.balance <- MatchBalance(treat ~ age + education + black + hispanic + married + nodegree + re74 + re75, data = nsw.obs, match.out = match.gen.opt)
 nsw.obs.gen.opt.est <- match.gen.opt$est[1, 1]
 nsw.obs.gen.opt.se <- match.gen.opt$se
 nsw.obs.gen.opt.ci <- c(nsw.obs.gen.opt.est - 2*nsw.obs.gen.opt.se, nsw.obs.gen.opt.est + 2*nsw.obs.gen.opt.se)
 cat("The genetic optvariate(ly) matched observational 95% confidence interval for the treatment effect is \n(", 
     nsw.obs.gen.opt.ci[1], ", ", nsw.obs.gen.opt.ci[2], ").", sep = "")
 
+# (8) Entropy Balancing
 
+library(ebal)
+eb.full <- ebalance(Treatment = nsw.obs$treat, X = nsw.obs %>% dplyr::select(-treat, -re78))
+eb.full.est <- mean(nsw.obs[nsw.obs$treat == 1,]$re78) -
+  weighted.mean(nsw.obs[nsw.obs$treat == 0,]$re78, w = eb.full$w)
 
+nsw.obs.matched <- as.data.frame(cbind(treat = match.gen.opt$mdata$Tr, re78 = match.gen.opt$mdata$Y, match.gen.opt$mdata$X))
+nsw.obs.matched <- nsw.obs.matched %>% dplyr::select(-Propensity)
+eb.matched <- ebalance(Treatment = nsw.obs.matched$treat, X = nsw.obs.matched %>% dplyr::select(-treat, -re78))
+eb.matched.est <- mean(nsw.obs.matched[nsw.obs.matched$treat == 1,]$re78) -
+  weighted.mean(nsw.obs.matched[nsw.obs.matched$treat == 0,]$re78, w = eb.matched$w)
 
+eb.store <- c()
+for (i in 1:1000) {
+  print(i)
+  nsw.obs.temp <- nsw.obs.matched[sample(1:nrow(nsw.obs.matched), nrow(nsw.obs.matched), replace = T),]
+  eb.temp <- ebalance(Treatment = nsw.obs.temp$treat, X = nsw.obs.temp %>% dplyr::select(-treat, -re78))
+  eb.store[i] <- mean(nsw.obs.temp[nsw.obs.temp$treat == 1,]$re78) -
+    weighted.mean(nsw.obs.temp[nsw.obs.temp$treat == 0,]$re78, w = eb.temp$w)
+}
+mean(eb.store)
+sort(eb.store)[25]
+sort(eb.store)[975]
